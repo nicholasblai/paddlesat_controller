@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
 
 # ============================================================
 # SECTION 1: Simulation parameters
@@ -160,9 +161,66 @@ def bangbang_controller(k, x_k, phi_k, threshold_frac=0.75, clip_deg=8.0):
     else:
         return abs(u_correction)   # push east
 
-def mpc_controller_stub(k, x_k, phi_k, horizon=6):
-    # Placeholder: behave like static controller until implemented
-    return 0.0
+# Cost function for the Model Predictive Control
+def mpc_cost(u_sequence, x0, phi0, q=1.0, r=0.1, p=0.01, horizon=12):
+    cost = 0.0
+    x_k = x0.copy()
+    phi_k = phi0
+
+    lam_max = deg2rad(lambda_max_deg)
+
+    for i in range(horizon):
+        u_k = u_sequence[i]
+
+        # Step the model forward
+        x_next, phi_next = step_dynamics_matrix(x_k, phi_k, u_k)
+
+        lambda_i = float(x_next[0, 0])
+        v_i      = float(x_next[1, 0])
+
+        # State cost: penalize drift rate and being outside the box
+        lambda_normalized = lambda_i / lam_max
+        cost += q * lambda_normalized**2
+        cost += r * v_i**2
+        
+        # Further penalize being outside of lambda_max
+        if abs(lambda_i) > lam_max:
+            cost += 1000.0 * (abs(lambda_i) - lam_max)**2
+
+        # Control cost: penalize using control effort, which pushes you away from max power generation (alpha = 0)
+        cost += p * u_k**2
+
+        # Advance
+        x_k   = x_next
+        phi_k = phi_next
+    
+    return cost
+
+def mpc_controller(k, x_k, phi_k, horizon=12, q=1.0, r=0.1, p=0.01):
+    # Initial Guess
+    u_init = np.zeros(horizon)
+
+    bounds = [(-1.0, 1.0)] * horizon
+
+    # Calculate the cost
+    def objective(u_sequence):
+        return mpc_cost(u_sequence, x_k, phi_k,
+                            q=q, r=r, p=p, horizon=horizon)
+
+    # Find the path with the minimum cost 
+    result = minimize(
+        objective,
+        u_init,
+        method='SLSQP',
+        bounds=bounds,
+        options={'ftol': 1e-6, 'maxiter': 100}
+    )
+
+    # Apply the first control from the minimum cost path
+    if result.success:
+        return float(result.x[0])
+    else:
+        return 0.0
 
 # ============================================================
 # SECTION 6: Allocate arrays and initialize simulation
@@ -192,7 +250,13 @@ for k in range(N):
 
     # CHOOSE YOUR CONTROLLER HERE
     # u_k = static_controller(k, x_k, phi_k, alpha_deg=0.0)
-    u_k = bangbang_controller(k, x_k, phi_k, clip_deg=8.0, threshold_frac=0.85)
+    # u_k = bangbang_controller(k, x_k, phi_k, clip_deg=8.0, threshold_frac=0.85)
+    # MPC CONTROLLERS
+    # Very agressive MPC controller focused on minimizing longitude error/station-keeping and less on power generation
+    u_k = mpc_controller(k, x_k, phi_k, horizon=12, q=0.10, r=0.01, p=0.0)
+
+    # Less agressive MPC Controller, focused more on power generation and less on station-keeping, allowing for more drift
+    # u_k = mpc_controller(k, x_k, phi_k, horizon=12, q=0.000001, r=0.00001, p=1.0)
 
     alpha_k = u_to_alpha(u_k)
 
@@ -244,7 +308,7 @@ axs[0].plot(time_days, lambda_deg_hist, label="Longitude error")
 axs[0].axhline( lambda_max_deg, linestyle="--", color="red", label="Bounds")
 axs[0].axhline(-lambda_max_deg, linestyle="--", color="red")
 axs[0].set_ylabel("Longitude error [deg]")
-axs[0].set_title("Reduced-Order PaddleSat Simulation (Option A: u = sin(2α))")
+axs[0].set_title("Reduced-Order PaddleSat Simulation")
 axs[0].legend()
 
 axs[1].plot(time_days, v_degday_hist, label="Drift rate")
